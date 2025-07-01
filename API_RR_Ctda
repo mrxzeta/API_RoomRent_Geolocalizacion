@@ -1,0 +1,199 @@
+// Clase principal de la actividad que permite seleccionar una ubicación usando Google Maps
+class SeleccionarUbicacion : AppCompatActivity(), OnMapReadyCallback {
+
+    // ViewBinding para acceder a los elementos del layout
+    private lateinit var binding: ActivitySeleccionarUbicacionBinding
+
+    // Constante para definir el nivel de zoom por defecto
+    private companion object {
+        private const val DEFAULT_ZOOM = 15
+    }
+
+    // Objeto del mapa
+    private var nMap: GoogleMap? = null
+
+    // Cliente para acceder a la API de Google Places
+    private var mPlaceClient: PlacesClient? = null
+
+    // Cliente para obtener la ubicación actual del dispositivo
+    private var mFusedLocationProviderClient: FusedLocationProviderClient? = null
+
+    // Variables para almacenar la última ubicación conocida y la seleccionada
+    private var mLastKnownLocation: Location? = null
+    private var selectedLatitude: Double? = null
+    private var selectedLongitude: Double? = null
+    private var direccion = ""
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Inicializa el ViewBinding
+        binding = ActivitySeleccionarUbicacionBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        // Oculta el contenedor de confirmación al inicio
+        binding.listoLl.visibility = View.GONE
+
+        // Configura el fragmento del mapa
+        val mapFragment = supportFragmentManager.findFragmentById(R.id.MapFragmen) as SupportMapFragment
+        mapFragment.getMapAsync(this)
+
+        // Inicializa Places API con la API key
+        Places.initialize(this, getString(R.string.mi_google_maps_api_key))
+        mPlaceClient = Places.createClient(this)
+        mFusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this)
+
+        // Configura el fragmento de autocompletado de ubicaciones
+        val autocompleteSupportMapFragment = supportFragmentManager.findFragmentById(R.id.autocompletar_fragment)
+                as AutocompleteSupportFragment
+
+        // Campos de lugar que se obtendrán al seleccionar una dirección
+        val placeList = arrayOf(
+            Place.Field.ID,
+            Place.Field.NAME,
+            Place.Field.ADDRESS,
+            Place.Field.LAT_LNG)
+
+        autocompleteSupportMapFragment.setPlaceFields(listOf(*placeList))
+
+        // Listener para manejar la selección de una ubicación desde el autocompletado
+        autocompleteSupportMapFragment.setOnPlaceSelectedListener(object : PlaceSelectionListener {
+
+            override fun onPlaceSelected(place: Place) {
+                // Almacena la latitud, longitud y dirección seleccionadas
+                selectedLatitude = place.latLng?.latitude
+                selectedLongitude = place.latLng?.longitude
+                direccion = place.address ?: ""
+
+                // Agrega un marcador en el mapa con la ubicación seleccionada
+                agregarMarcador(place.latLng, place.name, direccion)
+            }
+
+            override fun onError(p0: Status) {
+                Toast.makeText(applicationContext, "Búsqueda cancelada", Toast.LENGTH_SHORT).show()
+            }
+        })
+
+        // Botón para usar la ubicación actual
+        binding.IbGps.setOnClickListener {
+            if (esGpsActivado()) {
+                solicitarPermisoLocacion.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            } else {
+                Toast.makeText(this, "!La ubicación no está activada! Actívala para mostrar la ubicación actual", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Botón para confirmar la ubicación seleccionada y enviarla a la actividad anterior
+        binding.BtnListo.setOnClickListener {
+            val intent = Intent()
+            intent.putExtra("latitud", selectedLatitude)
+            intent.putExtra("longitud", selectedLongitude)
+            intent.putExtra("direccion", direccion)
+            setResult(Activity.RESULT_OK, intent)
+            finish()
+        }
+    }
+
+    // Función que activa la localización del lugar actual
+    private fun elegirLugarActual() {
+        if (nMap == null) return
+        detectAndShowDeviceLocationMap()
+    }
+
+    // Detecta la ubicación actual del usuario y la muestra en el mapa
+    @SuppressLint("MissingPermission")
+    private fun detectAndShowDeviceLocationMap() {
+        try {
+            val locationResult = mFusedLocationProviderClient!!.lastLocation
+            locationResult.addOnSuccessListener { location ->
+                if (location != null) {
+                    mLastKnownLocation = location
+                    selectedLatitude = location.latitude
+                    selectedLongitude = location.longitude
+
+                    val latLng = LatLng(selectedLatitude!!, selectedLongitude!!)
+                    nMap!!.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, DEFAULT_ZOOM.toFloat()))
+                    nMap!!.animateCamera(CameraUpdateFactory.zoomTo(DEFAULT_ZOOM.toFloat()))
+
+                    direccionLatLng(latLng)
+                }
+            }
+        } catch (e: Exception) {
+            // Silencia cualquier error
+        }
+    }
+
+    // Verifica si el GPS o red están activados
+    private fun esGpsActivado(): Boolean {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        var gpsEnable = false
+        var networkEnable = false
+
+        try {
+            gpsEnable = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+        } catch (e: Exception) {}
+
+        try {
+            networkEnable = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        } catch (e: Exception) {}
+
+        return gpsEnable || networkEnable
+    }
+
+    // Solicita permiso de localización al usuario
+    @SuppressLint("MissingPermission")
+    private val solicitarPermisoLocacion: ActivityResultLauncher<String> =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { seConcede ->
+            if (seConcede) {
+                nMap!!.isMyLocationEnabled = true
+                elegirLugarActual()
+            } else {
+                Toast.makeText(this, "Permiso denegado", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+    // Se ejecuta cuando el mapa está listo para usarse
+    override fun onMapReady(googleMap: GoogleMap) {
+        nMap = googleMap
+        solicitarPermisoLocacion.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+
+        // Cuando el usuario hace clic en el mapa, guarda la lat/lng y busca dirección
+        nMap!!.setOnMapClickListener { latlng ->
+            selectedLatitude = latlng.latitude
+            selectedLongitude = latlng.longitude
+            direccionLatLng(latlng)
+        }
+    }
+
+    // Busca la dirección textual basada en coordenadas
+    private fun direccionLatLng(latlng: LatLng) {
+        val geoCoder = Geocoder(this)
+        try {
+            val addressList = geoCoder.getFromLocation(latlng.latitude, latlng.longitude, 1)
+            val address = addressList!![0]
+            val addressLine = address.getAddressLine(0)
+            val subLocality = address.subLocality
+            direccion = addressLine
+            agregarMarcador(latlng, subLocality ?: "", addressLine)
+        } catch (e: Exception) {}
+    }
+
+    // Agrega un marcador verde al mapa con título y dirección
+    private fun agregarMarcador(latlng: LatLng, titulo: String, direccion: String) {
+        nMap!!.clear()
+        try {
+            val markerOptions = MarkerOptions()
+                .position(latlng)
+                .title(titulo)
+                .snippet(direccion)
+                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN))
+
+            nMap!!.addMarker(markerOptions)
+            nMap!!.moveCamera(CameraUpdateFactory.newLatLngZoom(latlng, DEFAULT_ZOOM.toFloat()))
+
+            // Muestra la interfaz de confirmación
+            binding.listoLl.visibility = View.VISIBLE
+            binding.lugarSelecTv.text = direccion
+        } catch (e: Exception) {}
+    }
+}
